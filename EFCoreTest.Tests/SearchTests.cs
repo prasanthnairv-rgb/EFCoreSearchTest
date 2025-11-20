@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Xunit;
@@ -8,167 +9,152 @@ using Moq;
 using EFCoreTest.Data;
 using EFCoreTest.Services;
 
-public class SearchTest
+public sealed class SearchTest : IDisposable
 {
-    private AppDbContext GetDbContext()
+    private readonly DateTime _baseTime = new(2025, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+
+    private readonly AppDbContext _db;
+
+    public SearchTest()
     {
         var options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .EnableSensitiveDataLogging(false)
+            .EnableDetailedErrors()
             .Options;
 
-        return new AppDbContext(options);
+        _db = new AppDbContext(options);
     }
 
-    private CodingTestService GetService(AppDbContext db)
-    {
-        var logger = Mock.Of<ILogger<CodingTestService>>();
-        return new CodingTestService(db, logger);
-    }
+    public void Dispose() => _db.Dispose();
 
-    private async Task SeedData(AppDbContext db)
-    {
-        // Clear existing data
-        db.Posts.RemoveRange(db.Posts);
-        db.Users.RemoveRange(db.Users);
-        await db.SaveChangesAsync();
+    private CodingTestService CreateService() =>
+        new(_db, Mock.Of<ILogger<CodingTestService>>());
 
-        // Seed a single user
+    private async Task SeedStandardDataAsync()
+    {
+        _db.Posts.RemoveRange(_db.Posts);
+        _db.Users.RemoveRange(_db.Users);
+        await _db.SaveChangesAsync();
+
         var user = new User { Id = 1, Name = "Prasanth" };
-        db.Users.Add(user);
+        _db.Users.Add(user);
 
-        // Seed posts
-        db.Posts.AddRange(
+        _db.Posts.AddRange(
             new Post
             {
                 Id = 1,
-                Title = "Core Test",     
+                Title = "Core Test",
                 Content = "This is a search content",
-                AuthorId = 1,
                 Author = user,
-                CreatedAt = DateTime.Now.AddMinutes(-1)
+                AuthorId = 1,
+                CreatedAt = _baseTime.AddMinutes(-1)
             },
             new Post
             {
                 Id = 2,
-                Title = "Testing Post",            
+                Title = "Testing Post",
                 Content = "Content for unit tests",
-                AuthorId = 1,
                 Author = user,
-                CreatedAt = DateTime.Now.AddMinutes(-2)
+                AuthorId = 1,
+                CreatedAt = _baseTime.AddMinutes(-2)
             },
             new Post
             {
                 Id = 3,
-                Title = "Random Post Test",        
+                Title = "Random Post Test",
                 Content = "Search keyword",
-                AuthorId = 1,
                 Author = user,
-                CreatedAt = DateTime.Now.AddMinutes(-3)
+                AuthorId = 1,
+                CreatedAt = _baseTime.AddMinutes(-3)
             },
             new Post
             {
                 Id = 4,
-                Title = "Insensitive Test",        
+                Title = "Insensitive Test",
                 Content = "Testing case insensitivity",
-                AuthorId = 1,
                 Author = user,
-                CreatedAt = DateTime.Now.AddMinutes(-4)
+                AuthorId = 1,
+                CreatedAt = _baseTime.AddMinutes(-4)
             },
             new Post
             {
                 Id = 5,
                 Title = "Special! Characters Post",
                 Content = "Content with special characters like !@#$",
-                AuthorId = 1,
                 Author = user,
-                CreatedAt = DateTime.Now.AddMinutes(-5)
+                AuthorId = 1,
+                CreatedAt = _baseTime.AddMinutes(-5)
             }
         );
 
-        await db.SaveChangesAsync();
+        await _db.SaveChangesAsync();
     }
 
+    //Test Cases
 
-    // TEST 1: Title search
     [Fact]
     public async Task Search_By_Title_Returns_Correct_Result()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("Core Test", 10);
 
         Assert.Single(results);
-        Assert.Equal("Core Test", results.First().Title);
+        Assert.Equal("Core Test", results[0].Title);
     }
 
-    // TEST 2: Content search
     [Fact]
     public async Task Search_By_Content_Returns_Correct_Posts()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("unit tests", 10);
 
         Assert.Single(results);
-        Assert.Equal("Testing Post", results.First().Title);
+        Assert.Equal("Testing Post", results[0].Title);
     }
 
-    // TEST 3: Max limit
     [Fact]
     public async Task Search_Returns_Limited_MaxItems()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("", 2);
 
         Assert.Equal(2, results.Count);
     }
 
-    // TEST 4: Empty list
     [Fact]
     public async Task Search_No_Match_Returns_Empty()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("notfound", 10);
 
         Assert.Empty(results);
     }
 
-    // TEST 5: Case insensitivity
     [Fact]
     public async Task Search_Is_Case_Insensitive()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("insensitive test", 10);
 
-        Assert.Contains(results, r => r.Title.Contains("Insensitive Test"));
+        Assert.Contains(results, r => r.Title == "Insensitive Test");
     }
 
-    //TEST 9: Date sort
     [Fact]
     public async Task Search_Results_Are_Sorted_By_CreatedAt_Desc()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("", 10);
 
@@ -176,63 +162,58 @@ public class SearchTest
         Assert.True(results[1].CreatedAt > results[2].CreatedAt);
     }
 
-    //TEST 10: Special characters
     [Fact]
-    public async Task Search_With_Special_Characters()
+    public async Task Search_With_Special_Characters_Returns_Zero()
     {
-        var db = GetDbContext();
-        await SeedData(db);
-
-        var service = GetService(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("content!", 10);
 
         Assert.Empty(results);
     }
 
-    //TEST 11: Empty search
     [Fact]
-    public async Task Search_NullOrEmpty_Query_Returns_All_Limited()
+    public async Task Search_NullOrEmpty_Query_Returns_All()
     {
-        var db = GetDbContext();
-        await SeedData(db);
+        await SeedStandardDataAsync();
+        var service = CreateService();
 
-        var service = GetService(db);
+        var emptyResults = await service.SearchPostSummariesAsync("", 10);
 
-        var results1 = await service.SearchPostSummariesAsync("", 10);
-        var results2 = await service.SearchPostSummariesAsync(null, 10);
+        // Intentional null
+        string? nullQuery = null;
+        var nullResults = await service.SearchPostSummariesAsync(nullQuery!, 10);
 
-        Assert.Equal(5, results1.Count);
-        Assert.Equal(5, results2.Count);
+        Assert.Equal(5, emptyResults.Count);
+        Assert.Equal(5, nullResults.Count);
     }
 
-    //TEST 12: Large Data set
     [Fact]
     public async Task Search_Large_Dataset_Performance()
     {
-        var db = GetDbContext();
+        var user = new User { Name = "Prasanth" };
+        _db.Users.Add(user);
 
-        var user = new User { Id = 1, Name = "Prasanth" };
-        db.Users.Add(user);
-
-        for (int i = 0; i < 1000; i++)
+        for (var i = 0; i < 1000; i++)
         {
-            db.Posts.Add(new Post
-            {
-                Title = $"Title {i}",
-                Content = $"Content {i}",
-                AuthorId = 1,
-                Author = user,
-                CreatedAt = DateTime.Now
-            });
+            _db.Posts.Add(
+                new Post
+                {
+                    Title = $"Title {i}",
+                    Content = $"Content {i}",
+                    Author = user,
+                    AuthorId = user.Id,
+                    CreatedAt = _baseTime
+                });
         }
-        await db.SaveChangesAsync();
+        await _db.SaveChangesAsync();
 
-        var service = GetService(db);
+        var service = CreateService();
 
         var results = await service.SearchPostSummariesAsync("Title 500", 10);
 
         Assert.Single(results);
-        Assert.Equal("Title 500", results.First().Title);
+        Assert.Equal("Title 500", results[0].Title);
     }
 }

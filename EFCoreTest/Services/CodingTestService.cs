@@ -1,5 +1,7 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using EFCoreTest.Data;
@@ -10,146 +12,151 @@ namespace EFCoreTest.Services;
 
 public class CodingTestService(AppDbContext db, ILogger<CodingTestService> logger) : ICodingTestService
 {
-    private readonly AppDbContext _db = db;
-    private readonly ILogger<CodingTestService> _logger = logger;
+    private readonly AppDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
+    private readonly ILogger<CodingTestService> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    // Reusable projection
+    private static readonly Expression<Func<Post, PostDto>> PostToDto = p => new PostDto
+    {
+        Id = p.Id,
+        Title = p.Title ?? string.Empty,
+        Excerpt = p.Content != null
+            ? (p.Content.Length <= 200 ? p.Content : p.Content.Substring(0, 200) + "...")
+            : string.Empty,
+        AuthorName = p.Author != null ? (p.Author.Name ?? "Unknown") : "Unknown",
+        CommentCount = p.Comments.Count,
+        CreatedAt = p.CreatedAt
+    };
 
     public async Task GeneratePostSummaryReportAsync(int maxItems)
     {
-        // Task placeholder:
-        // - Emit REPORT_START, then up to `maxItems` lines prefixed with "POST_SUMMARY|" and
-        //   finally REPORT_END. Each summary line must include PostId|AuthorName|CommentCount|LatestCommentAuthor.
-        // - Method must be read-only and efficient for large datasets;
-        // Implement the method body in the assessment; do not change the signature.
-
-        try 
-        { 
         _logger.LogInformation("REPORT_START");
 
-        var query =
-            _db.Posts
-               .AsNoTracking()
-               .OrderByDescending(p => p.CreatedAt)
-               .Select(p => new
-               {
-                   p.Id,
-                   AuthorName = p.Author.Name,
-                   CommentCount = p.Comments.Count,
-                   LatestCommentAuthor =
-                    p.Comments
-                     .OrderByDescending(c => c.CreatedAt)
-                     .Select(c => c.Author.Name)
-                     .FirstOrDefault()
-               })
-               .Take(maxItems)
-               .AsAsyncEnumerable();
-
-        await foreach (var item in query)
+        // If nothing
+        if (maxItems <= 0)
         {
-            _logger.LogInformation(
-                "POST_SUMMARY|{Id}|{Author}|{Count}|{Latest}",
-                item.Id,
-                item.AuthorName,
-                item.CommentCount,
-                item.LatestCommentAuthor ?? ""
-            );
+            _logger.LogInformation("REPORT_END (no items requested)");
+            return;
         }
 
-        // End report
-        _logger.LogInformation("REPORT_END");
+        try
+        {
+            // Server-side
+            var query = _db.Posts
+                .AsNoTracking()
+                .OrderByDescending(p => p.CreatedAt)
+                .Select(p => new
+                {
+                    p.Id,
+                    AuthorName = p.Author != null ? (p.Author.Name ?? "Unknown") : "Unknown",
+                    CommentCount = p.Comments.Count,
+                    LatestCommentAuthor = p.Comments
+                        .OrderByDescending(c => c.CreatedAt)
+                        .Select(c => c.Author != null ? (c.Author.Name ?? "Unknown") : "Unknown")
+                        .FirstOrDefault() ?? "None"
+                })
+                .Take(maxItems)
+                .AsAsyncEnumerable();
+
+            await foreach (var item in query.ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "POST_SUMMARY|{Id}|{Author}|{Count}|{Latest}",
+                    item.Id,
+                    item.AuthorName,
+                    item.CommentCount,
+                    item.LatestCommentAuthor);
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "GeneratePostSummaryReportAsync failed");
-
-            throw new NotImplementedException(
-                "Implement GeneratePostSummaryReportAsync according to assessment requirements."
-            );
+            throw;
+        }
+        finally
+        {
+            _logger.LogInformation("REPORT_END");
         }
     }
 
     public async Task<IList<PostDto>> SearchPostSummariesAsync(string query, int maxResults = 50)
     {
-        // Task placeholder:
-        // - Return at most `maxResults` PostDto entries.
-        // - Treat null/empty/whitespace query as no filter (return unfiltered results up to maxResults).
-        // - Matching: case-insensitive substring in Title OR Content.
-        // - Order by CreatedAt descending, project to PostDto, and avoid materializing full entities.
-        // Implement the method body in the assessment; do not change the signature.
+        // Validation
+        if (maxResults <= 0) return Array.Empty<PostDto>();
+
         try
         {
-            IQueryable<Post> q = _db.Posts.AsNoTracking();
+            IQueryable<Post> posts = _db.Posts.AsNoTracking();
 
+            // Server-side case-insensitive
             if (!string.IsNullOrWhiteSpace(query))
             {
-                var lowered = query.ToLower();
-
-                q = q.Where(p =>
-                    p.Title.ToLower().Contains(lowered) ||
-                    p.Content.ToLower().Contains(lowered)
-                );
+                // Trim whitespace & use pattern
+                var pattern = $"%{query.Trim()}%";
+                posts = posts.Where(p =>
+                    EF.Functions.Like(p.Title, pattern) ||
+                    EF.Functions.Like(p.Content, pattern));
             }
 
-            return await q
+            // limited results.
+            var list = await posts
                 .OrderByDescending(p => p.CreatedAt)
-                .Select(p => new PostDto
-                {
-                    Id = p.Id,
-                    Title = p.Title,
-                    AuthorName = p.Author.Name,
-                    CommentCount = p.Comments.Count,
-                    CreatedAt = p.CreatedAt
-                })
+                .ThenBy(p => p.Id)
+                .Select(PostToDto)
                 .Take(maxResults)
-                .ToListAsync();
+                .ToListAsync()
+                .ConfigureAwait(false);
+
+            return list;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "SearchPostSummariesAsync failed");
-
-            throw new NotImplementedException("Implement SearchPostSummariesAsync according to assessment requirements.");
+            _logger.LogError(ex, "SearchPostSummariesAsync failed (query='{Query}', maxResults={Max})", query ?? "<null>", maxResults);
+            throw;
         }
     }
 
-    public async Task<IList<PostDto>> SearchPostSummariesAsync<TKey>(string query,int skip,int take,Expression<Func<PostDto, TKey>> orderBySelector,bool descending)
+    public async Task<IList<PostDto>> SearchPostSummariesAsync<TKey>(
+    string query,
+    int skip,
+    int take,
+    Expression<Func<PostDto, TKey>> orderBySelector,
+    bool descending)
     {
-        // Task placeholder: 
-        // - Server-side filter by query (null/empty => no filter), server-side ordering based on 
-        // the provided DTO selector, then Skip/Take for paging. Project to PostDto and avoid 
-        // per-row queries or client-side paging. 
-        // - Implementations may choose which selectors to support; unsupported selectors may 
-        // be rejected by the grader. 
-        // Implement the method body in the assessment; do not change the signature.
+        if (take <= 0)
+            return Array.Empty<PostDto>();
+
+        if (skip < 0)
+            skip = 0;
+
         try
         {
-            IQueryable<Post> q = _db.Posts.AsNoTracking();
+            IQueryable<Post> posts = _db.Posts.AsNoTracking();
 
-            // Filter
+            // Apply search filter
             if (!string.IsNullOrWhiteSpace(query))
             {
-                var lowered = query.ToLower();
-                q = q.Where(p =>
-                    p.Title.ToLower().Contains(lowered) ||
-                    p.Content.ToLower().Contains(lowered)
-                );
+                var pattern = $"%{query.Trim()}%";
+
+                posts = posts.Where(p =>
+                    EF.Functions.Like(p.Title, pattern) ||
+                    EF.Functions.Like(p.Content, pattern));
             }
 
-            // DTO
-            var dtoQuery = q.Select(p => new PostDto
-            {
-                Id = p.Id,
-                Title = p.Title,
-                AuthorName = p.Author.Name,
-                CommentCount = p.Comments.Count,
-                CreatedAt = p.CreatedAt
-            });
+            // Base projection
+            var dtoQuery = posts.Select(PostToDto);
 
-            // Sort
-            string memberName = (orderBySelector.Body as MemberExpression)?.Member?.Name;
+            // Extract property name (supports UnaryExpression)
+            var memberExpr =
+                orderBySelector.Body is UnaryExpression u
+                    ? u.Operand as MemberExpression
+                    : orderBySelector.Body as MemberExpression;
 
-            if (memberName is null)
-                throw new NotSupportedException("Only simple PostDto property ordering is supported.");
+            var memberName = memberExpr?.Member?.Name
+                ?? throw new NotSupportedException("Only simple PostDto property ordering is supported.");
 
-            dtoQuery = memberName switch
+            // IMPORTANT: must be IOrderedQueryable<T> for ThenBy()
+            IOrderedQueryable<PostDto> orderedQuery = memberName switch
             {
                 nameof(PostDto.CreatedAt) =>
                     descending ? dtoQuery.OrderByDescending(x => x.CreatedAt)
@@ -170,18 +177,25 @@ public class CodingTestService(AppDbContext db, ILogger<CodingTestService> logge
                 _ => throw new NotSupportedException($"Ordering by '{memberName}' is not supported.")
             };
 
-            // Paging
-            return await dtoQuery
+            // Stable secondary ordering (critical for paging)
+            orderedQuery = orderedQuery.ThenBy(x => x.Id);
+
+            // Apply paging
+            return await orderedQuery
                 .Skip(skip)
                 .Take(take)
-                .ToListAsync();
+                .ToListAsync()
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Paged SearchPostSummariesAsync failed");
+            _logger.LogError(
+                ex,
+                "SearchPostSummariesAsync (paged) failed (query='{Query}', skip={Skip}, take={Take})",
+                query ?? "<null>", skip, take);
 
-            throw new NotImplementedException("Implement SearchPostSummariesAsync (paged) according to assessment requirements.");
+            throw;
         }
     }
-
 }
+

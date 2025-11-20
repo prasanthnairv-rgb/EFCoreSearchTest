@@ -2,6 +2,8 @@
 using EFCoreTest.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using System;
+using System.Threading.Tasks;
 
 public class CodingTestServiceTests
 {

@@ -14,6 +14,7 @@ namespace EFCoreTest;
 
 internal class Program
 {
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     static async Task Main(string[] args)
     {
             Log.Logger = new LoggerConfiguration()
